@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Digital ACLS Recorder 2025 (Standalone)</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            animation: {
+              'bounce-slow': 'bounce 3s infinite',
+              'pulse-fast': 'pulse 1s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+            }
+          }
+        }
+      }
+    </script>
+
+    <!-- React & ReactDOM (UMD) -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- Babel Standalone (for JSX) -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Lucide Icons (React UMD) -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://unpkg.com/lucide-react@latest/dist/umd/lucide-react.min.js"></script>
+
+    <!-- jsPDF & AutoTable -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
+
+    <style>
+      /* Custom scrollbar for dark mode */
+      ::-webkit-scrollbar { width: 8px; }
+      ::-webkit-scrollbar-track { background: #1f2937; }
+      ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+      ::-webkit-scrollbar-thumb:hover { background: #6b7280; }
+      /* Prevent iOS tap highlight */
+      * { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+    </style>
+</head>
+<body class="bg-gray-900 text-white overflow-hidden">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        // --- GLOBALS & UTILS ---
+        const { useState, useEffect, useReducer, useMemo } = React;
+        const { 
+            Activity, Syringe, Zap, FileDown, CheckCircle, 
+            Thermometer, Droplet, TestTube, Stethoscope, X, 
+            HeartPulse, User, Clock, RotateCcw, Menu, FileText, List, 
+            ClipboardList, CheckSquare, Square, Printer, Skull, Undo2,
+            AlertTriangle, Eye, Wind, Heart, PlayCircle, Gauge, Pencil,
+            HelpCircle, ChevronDown, ChevronUp, Pill, MessageSquare, Trash2
+        } = lucideReact;
+
+        const { jsPDF } = window.jspdf;
+        const autoTable = (doc, options) => doc.autoTable(options);
+
+        // --- CONSTANTS ---
+        const initialSurvey = {
+            generalImpression: null, avpu: null, airway: null,
+            breathingStatus: null, spo2: '', rr: '',
+            pulse: null, bpSys: '', bpDia: '', skin: null, notes: ''
+        };
+
+        const ROSC_CHECKLIST_LABELS = {
+            'Airway': 'Airway : early ETT placement, recheck ETT',
+            'Breathing': 'Breathing : RR 10/min, SpO2 92-98%, PaCO2 35-45',
+            'Circulation': 'Circulation : SBP > 90, MAP > 65',
+            'Diagnosis': 'Diagnosis : 5H 5T',
+            'ECG': 'ECG 12 leads : PCI if STEMI, ECMO',
+            'Commands': 'Follow commands? : if not TTM, EEG, CT',
+            'ICU': 'Consider ICU admission'
+        };
+
+        const LAB_OPTIONS = ['DTX', 'CBC', 'Elyte', 'BUN/Cr', 'Hemo/Coag', 'Trop-T', 'Lactate', 'ABG'];
+
+        const HT_DATA = [
+            { type: 'H', id: 'Hypovolemia', label: 'Hypovolemia', clues: ['History of fluid loss/blood loss', 'Flat neck veins', 'IV Fluids required'] },
+            { type: 'H', id: 'Hypoxia', label: 'Hypoxia', clues: ['Airway obstruction', 'Desaturation', 'Cyanosis'] },
+            { type: 'H', id: 'Hydrogen', label: 'Hydrogen Ion (Acidosis)', clues: ['Diabetes', 'Renal Failure', 'ABG shows acidosis'] },
+            { type: 'H', id: 'Hyperkalemia', label: 'Hypo/Hyperkalemia', clues: ['Renal failure', 'Dialysis history', 'Peaked T waves (Hyper)', 'Flat T waves (Hypo)'] },
+            { type: 'H', id: 'Hypothermia', label: 'Hypothermia', clues: ['Exposure to cold', 'Low body temp'] },
+            { type: 'T', id: 'TensionPneumo', label: 'Tension Pneumothorax', clues: ['Tracheal deviation', 'Unequal breath sounds', 'Hypotension'] },
+            { type: 'T', id: 'Tamponade', label: 'Tamponade, Cardiac', clues: ['Muffled heart sounds', 'Distended neck veins', 'Hypotension'] },
+            { type: 'T', id: 'Toxins', label: 'Toxins', clues: ['History of ingestion', 'Empty bottles', 'Pupillary changes'] },
+            { type: 'T', id: 'ThrombosisPulm', label: 'Thrombosis, Pulmonary', clues: ['History of DVT', 'Bed bound', 'Distended neck veins'] },
+            { type: 'T', id: 'ThrombosisCoronary', label: 'Thrombosis, Coronary', clues: ['ST elevation', 'Angina history', 'Elevated troponin'] },
+        ];
+
+        // --- STATE & REDUCER ---
+        const initialState = {
+            viewMode: 'SURVEY',
+            isActive: false,
+            startTime: null,
+            totalSeconds: 0,
+            cycleSeconds: 0,
+            logs: [],
+            survey: initialSurvey,
+            shockCount: 0,
+            epiDoseCount: 0,
+            amioDoseCount: 0,
+            atropineTotalDose: 0,
+            lastEpiTime: null,
+            lastMedClick: 0,
+            airwaySecure: false,
+            ivAccessEstablished: false,
+            labsSent: false,
+            isAutoCPR: false,
+            currentRhythm: null,
+            ccfPercentage: 0,
+        };
+
+        const formatTime = (seconds) => {
+            const m = Math.floor(seconds / 60).toString().padStart(2, '0');
+            const s = (seconds % 60).toString().padStart(2, '0');
+            return `${m}:${s}`;
+        };
+
+        const formatRealTime = (date) => date.toLocaleTimeString('th-TH', { hour12: false });
+
+        const aclsReducer = (state, action) => {
+            switch (action.type) {
+                case 'UPDATE_SURVEY':
+                    return { ...state, survey: { ...state.survey, [action.field]: action.value } };
+                case 'GO_TO_WIZARD':
+                    return { ...state, viewMode: 'WIZARD' };
+                case 'START_CODE':
+                    const surveySummary = state.survey.avpu ? 
+                        `Survey: ${state.survey.generalImpression}, AVPU:${state.survey.avpu}, Airway:${state.survey.airway}, Pulse:${state.survey.pulse}` : 
+                        'Skipped Primary Survey';
+                    return {
+                        ...state, isActive: true, viewMode: 'RECORDER', startTime: Date.now(), currentRhythm: action.rhythm, ccfPercentage: 100,
+                        logs: [
+                            { id: 'init-log', timestamp: new Date(), offsetTime: '00:00', seconds: 0, action: 'STARTED CODE BLUE', category: 'INFO', detail: `Initial Rhythm: ${action.rhythm}` },
+                            { id: 'survey-log', timestamp: new Date(), offsetTime: '00:00', seconds: 0, action: 'Primary Survey', category: 'SURVEY', detail: surveySummary }
+                        ]
+                    };
+                case 'TICK':
+                    if (!state.isActive) return state;
+                    let currentCCF = state.isAutoCPR ? 100 : 98; 
+                    if (state.cycleSeconds > 115) currentCCF = 85;
+                    return { ...state, totalSeconds: state.totalSeconds + 1, cycleSeconds: state.cycleSeconds + 1, ccfPercentage: currentCCF };
+                case 'RESET_CYCLE':
+                    return {
+                        ...state, cycleSeconds: 0,
+                        logs: [{ id: Date.now().toString(), timestamp: new Date(), offsetTime: formatTime(state.totalSeconds), seconds: state.totalSeconds, action: 'Cycle Check (2 Min)', category: 'PROCEDURE', detail: 'Pulse Check / Rotate Compressor' }, ...state.logs]
+                    };
+                case 'ADD_LOG':
+                    let sCount = state.shockCount;
+                    if (action.action === 'Defibrillation') sCount++;
+                    return {
+                        ...state, shockCount: sCount,
+                        logs: [{ id: Date.now().toString(), timestamp: new Date(), offsetTime: formatTime(state.totalSeconds), seconds: state.totalSeconds, action: action.action, category: action.category, detail: action.detail }, ...state.logs]
+                    };
+                case 'ADMINISTER_MED':
+                    if (Date.now() - state.lastMedClick < 500) return state;
+                    let newEpiCount = state.epiDoseCount;
+                    let newAmioCount = state.amioDoseCount;
+                    let newAtropineTotal = state.atropineTotalDose;
+                    let newLastEpi = state.lastEpiTime;
+                    let drugDetail = '';
+                    if (action.medName === 'Adrenaline') { newEpiCount++; newLastEpi = state.totalSeconds; drugDetail = `1 mg IV/IO Push (Dose ${newEpiCount})`; }
+                    else if (action.medName === 'Amiodarone') { newAmioCount++; const dose = newAmioCount === 1 ? '300 mg' : '150 mg'; drugDetail = `${dose} IV/IO Push (Dose ${newAmioCount})`; }
+                    else if (action.medName === 'Atropine') { newAtropineTotal += 0.5; drugDetail = `0.5 mg IV (Total: ${newAtropineTotal} mg)`; }
+                    else if (action.medName === 'Dopamine') drugDetail = 'Start Infusion (Titrate)';
+                    else if (action.medName === 'Magnesium Sulfate') drugDetail = '2 g IV Slow Push (Diluted)';
+                    else if (action.medName === 'Sodium Bicarbonate') drugDetail = '50 mEq IV Push';
+                    else if (action.medName === 'Calcium Gluconate') drugDetail = '10% 10ml IV Slow Push';
+                    else if (action.medName === 'Lidocaine') drugDetail = '1-1.5 mg/kg IV';
+                    return {
+                        ...state, epiDoseCount: newEpiCount, amioDoseCount: newAmioCount, atropineTotalDose: newAtropineTotal, lastEpiTime: newLastEpi, lastMedClick: Date.now(),
+                        logs: [{ id: Date.now().toString(), timestamp: new Date(), offsetTime: formatTime(state.totalSeconds), seconds: state.totalSeconds, action: `Given ${action.medName}`, category: 'MED', detail: drugDetail }, ...state.logs]
+                    };
+                case 'SECURE_AIRWAY':
+                    return {
+                        ...state, airwaySecure: true,
+                        logs: [{ id: Date.now().toString(), timestamp: new Date(), offsetTime: formatTime(state.totalSeconds), seconds: state.totalSeconds, action: 'Advanced Airway Secured', category: 'PROCEDURE', detail: `${action.detail} (Continuous CPR)` }, ...state.logs]
+                    };
+                case 'ESTABLISH_IV':
+                    return {
+                        ...state, ivAccessEstablished: true,
+                        logs: [{ id: Date.now().toString(), timestamp: new Date(), offsetTime: formatTime(state.totalSeconds), seconds: state.totalSeconds, action: 'Vascular Access', category: 'PROCEDURE', detail: action.detail }, ...state.logs]
+                    };
+                case 'SEND_LABS':
+                    return {
+                        ...state, labsSent: true,
+                        logs: [{ id: Date.now().toString(), timestamp: new Date(), offsetTime: formatTime(state.totalSeconds), seconds: state.totalSeconds, action: 'Labs / Specimen', category: 'LAB', detail: action.detail }, ...state.logs]
+                    };
+                case 'TOGGLE_AUTO_CPR':
+                    const nextAuto = !state.isAutoCPR;
+                    return {
+                        ...state, isAutoCPR: nextAuto, ccfPercentage: nextAuto ? 100 : state.ccfPercentage,
+                        logs: [{ id: Date.now().toString(), timestamp: new Date(), offsetTime: formatTime(state.totalSeconds), seconds: state.totalSeconds, action: nextAuto ? 'Start Auto CPR' : 'Stop Auto CPR', category: 'PROCEDURE', detail: nextAuto ? 'Mechanical Compression ON' : 'Switch to Manual CPR' }, ...state.logs]
+                    };
+                case 'CHANGE_RHYTHM':
+                    return {
+                        ...state, currentRhythm: action.rhythm,
+                        logs: [{ id: Date.now().toString(), timestamp: new Date(), offsetTime: formatTime(state.totalSeconds), seconds: state.totalSeconds, action: 'Rhythm Change', category: 'RHYTHM', detail: `New Rhythm: ${action.rhythm}` }, ...state.logs]
+                    };
+                case 'REMOVE_LOG':
+                    const logToRemove = state.logs.find(l => l.id === action.logId);
+                    if (!logToRemove) return state;
+                    const filteredLogs = state.logs.filter(l => l.id !== action.logId);
+                    let updates = { logs: filteredLogs };
+                    if (logToRemove.action === 'Defibrillation') updates.shockCount = Math.max(0, state.shockCount - 1);
+                    if (logToRemove.action.includes('Adrenaline')) {
+                        updates.epiDoseCount = Math.max(0, state.epiDoseCount - 1);
+                        const remainingEpi = filteredLogs.filter(l => l.action.includes('Adrenaline'));
+                        updates.lastEpiTime = remainingEpi.length > 0 ? remainingEpi[0].seconds : null;
+                    }
+                    if (logToRemove.action.includes('Amiodarone')) updates.amioDoseCount = Math.max(0, state.amioDoseCount - 1);
+                    if (logToRemove.action.includes('Advanced Airway Secured')) updates.airwaySecure = filteredLogs.some(l => l.action.includes('Advanced Airway Secured'));
+                    if (logToRemove.action === 'Vascular Access') updates.ivAccessEstablished = filteredLogs.some(l => l.action === 'Vascular Access');
+                    if (logToRemove.action === 'Labs / Specimen') updates.labsSent = filteredLogs.some(l => l.action === 'Labs / Specimen');
+                    return { ...state, ...updates };
+                case 'UNDO':
+                    if (state.logs.length === 0) return state;
+                    const [lastLog, ...remainingLogs] = state.logs;
+                    const undoUpdates = { logs: remainingLogs };
+                    if (lastLog.action === 'Defibrillation') undoUpdates.shockCount = Math.max(0, state.shockCount - 1);
+                    if (lastLog.action.includes('Adrenaline')) {
+                        undoUpdates.epiDoseCount = Math.max(0, state.epiDoseCount - 1);
+                        const prevEpi = remainingLogs.find(l => l.action.includes('Adrenaline'));
+                        undoUpdates.lastEpiTime = prevEpi ? prevEpi.seconds : null;
+                    }
+                    if (lastLog.action.includes('Amiodarone')) undoUpdates.amioDoseCount = Math.max(0, state.amioDoseCount - 1);
+                    if (lastLog.action.includes('Advanced Airway Secured')) undoUpdates.airwaySecure = false;
+                    if (lastLog.action === 'Vascular Access') undoUpdates.ivAccessEstablished = false;
+                    if (lastLog.action === 'Labs / Specimen') undoUpdates.labsSent = false;
+                    if (lastLog.action.includes('Auto CPR')) undoUpdates.isAutoCPR = !state.isAutoCPR;
+                    return { ...state, ...undoUpdates };
+                default:
+                    return state;
+            }
+        };
+
+        const Badge = ({ count, color = 'bg-red-600' }) => {
+            if (count === 0) return null;
+            return <div className={`absolute -top-2 -right-2 ${color} text-white text-xs font-bold w-6 h-6 flex items-center justify-center rounded-full shadow-md border-2 border-gray-800 z-10`}>{count}</div>;
+        };
+
+        // --- MAIN COMPONENT ---
+        const ACLSRecorder = () => {
+            const [state, dispatch] = useReducer(aclsReducer, initialState);
+            const [patient, setPatient] = useState({ hn: '', name: '', age: '', weight: '', leaderName: '' });
+            const [activeModal, setActiveModal] = useState('NONE');
+            const [ettSize, setEttSize] = useState('7.5');
+            const [ettDepth, setEttDepth] = useState('22');
+            const [ivType, setIvType] = useState('NSS 0.9%');
+            const [ivRate, setIvRate] = useState('Free Flow');
+            const [ivSite, setIvSite] = useState('Peripheral IV');
+            const [dtxValue, setDtxValue] = useState('');
+            const [ventMethod, setVentMethod] = useState('BVM');
+            const [airwayDevice, setAirwayDevice] = useState('ETT');
+            const [vsBpSys, setVsBpSys] = useState('');
+            const [vsBpDia, setVsBpDia] = useState('');
+            const [vsHr, setVsHr] = useState('');
+            const [vsRr, setVsRr] = useState('');
+            const [vsSpo2, setVsSpo2] = useState('');
+            const [vsNote, setVsNote] = useState('');
+            const [energy, setEnergy] = useState('200');
+            const [selectedLogId, setSelectedLogId] = useState(null);
+            const [expandedDiagnosis, setExpandedDiagnosis] = useState(null);
+            const [customLab, setCustomLab] = useState("");
+            const [selectedLabs, setSelectedLabs] = useState([]);
+            const [roscChecklist, setRoscChecklist] = useState({
+                'Airway': false, 'Breathing': false, 'Circulation': false, 'Diagnosis': false, 'ECG': false, 'Commands': false, 'ICU': false
+            });
+
+            useEffect(() => {
+                if (state.viewMode === 'SURVEY') {
+                    const s = state.survey;
+                    if (s.avpu === 'U' && s.breathingStatus === 'Apnea' && s.pulse === 'Absent') dispatch({ type: 'GO_TO_WIZARD' });
+                }
+            }, [state.survey, state.viewMode]);
+
+            useEffect(() => {
+                let interval;
+                if (state.isActive) interval = setInterval(() => dispatch({ type: 'TICK' }), 1000);
+                return () => clearInterval(interval);
+            }, [state.isActive]);
+
+            const handleStart = (rhythm) => {
+                if (!patient.hn) {
+                    if(!confirm('คุณยังไม่ได้ระบุ HN\nระบบจะบันทึกเป็น "Unknown" ชั่วคราว และคุณสามารถแก้ไขข้อมูลย้อนหลังได้\n\nยืนยันเริ่ม Code หรือไม่?')) return;
+                }
+                dispatch({ type: 'START_CODE', rhythm });
+            };
+
+            const handleSaveVsNote = () => {
+                const parts = [];
+                if (vsBpSys || vsBpDia) parts.push(`BP: ${vsBpSys}/${vsBpDia}`);
+                if (vsHr) parts.push(`HR: ${vsHr}`);
+                if (vsRr) parts.push(`RR: ${vsRr}`);
+                if (vsSpo2) parts.push(`SpO2: ${vsSpo2}%`);
+                const vsString = parts.join(', ');
+                if (vsString || vsNote) {
+                    let action = 'Vital Signs';
+                    if (!vsString && vsNote) action = 'Clinical Note';
+                    let detail = vsString;
+                    if (vsNote) detail = vsString ? `${vsString} | ${vsNote}` : vsNote;
+                    dispatch({ type: 'ADD_LOG', category: 'INFO', action: action, detail: detail });
+                }
+                setVsBpSys(''); setVsBpDia(''); setVsHr(''); setVsRr(''); setVsSpo2(''); setVsNote('');
+                setActiveModal('NONE');
+            };
+
+            const isEpiReady = () => {
+                if (!state.lastEpiTime) return true;
+                return (state.totalSeconds - state.lastEpiTime) >= 180;
+            };
+
+            const isShockable = ['VF', 'pVT'].includes(state.currentRhythm || '');
+
+            const generatePDF = () => {
+                const doc = new jsPDF();
+                doc.setFontSize(16);
+                doc.text("CPCR RECORD FORM (Digital ACLS 2025)", 105, 15, { align: "center" });
+                doc.setFontSize(10);
+                doc.text(`Generated: ${new Date().toLocaleString('th-TH')}`, 105, 22, { align: "center" });
+                doc.setDrawColor(0);
+                doc.setFillColor(245, 245, 245);
+                doc.rect(14, 25, 182, 45, 'F');
+                doc.setFontSize(11);
+                doc.text(`HN: ${patient.hn || '-'}  Name: ${patient.name || '-'}`, 20, 33);
+                doc.text(`Age: ${patient.age || '-'} | Wt: ${patient.weight || '-'} kg`, 20, 40);
+                doc.text(`Leader: ${patient.leaderName || '-'}`, 20, 47);
+                doc.setFontSize(9);
+                const s = state.survey;
+                doc.text(`Initial Assessment: ${s.generalImpression || '-'} | AVPU: ${s.avpu || '-'} | Airway: ${s.airway || '-'} | Breathing: ${s.breathingStatus || '-'} (${s.spo2}% / ${s.rr}rpm) | Circ: ${s.pulse || '-'} (${s.bpSys}/${s.bpDia})`, 20, 55);
+                const epiCount = state.logs.filter(l => l.action.includes('Adrenaline')).length;
+                const shockCount = state.logs.filter(l => l.action.includes('Defibrillation')).length;
+                doc.setFontSize(11);
+                doc.text(`Summary: Adrenaline x${epiCount} | Shock x${shockCount} | Duration: ${formatTime(state.totalSeconds)}`, 14, 78);
+                const tableData = state.logs.slice().reverse().map(log => [formatRealTime(log.timestamp), log.offsetTime, log.category, log.action, log.detail || '-']);
+                autoTable(doc, { startY: 83, head: [['Time', 'T+ (min)', 'Cat', 'Action', 'Detail']], body: tableData, theme: 'grid' });
+                doc.save(`ACLS_${patient.hn || 'Unknown'}.pdf`);
+            };
+
+            const toggleLabSelection = (lab) => setSelectedLabs(prev => prev.includes(lab) ? prev.filter(l => l !== lab) : [...prev, lab]);
+            const toggleSelectAllLabs = () => setSelectedLabs(selectedLabs.length === LAB_OPTIONS.length ? [] : [...LAB_OPTIONS]);
+            const submitLabs = () => {
+                const parts = selectedLabs.filter(l => l !== 'DTX');
+                if (selectedLabs.includes('DTX')) parts.push(dtxValue ? `DTX: ${dtxValue} mg%` : 'DTX');
+                if (customLab.trim()) parts.push(customLab.trim());
+                if (parts.length > 0) dispatch({type: 'SEND_LABS', detail: parts.join(', ')});
+                setSelectedLabs([]); setCustomLab(""); setDtxValue(""); setActiveModal('NONE');
+            };
+
+            const renderPrimarySurvey = () => (
+                <div className="absolute inset-0 z-50 bg-gray-900 overflow-y-auto">
+                    <div className="bg-gray-800 p-4 sticky top-0 z-10 border-b border-gray-700 flex justify-between items-center shadow-lg">
+                        <h2 className="text-xl font-bold text-white flex items-center gap-2"><ClipboardList className="text-blue-400"/> Primary Survey</h2>
+                        <button onClick={() => dispatch({type: 'GO_TO_WIZARD'})} className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm text-gray-300">Skip to Code</button>
+                    </div>
+                    <div className="p-4 space-y-6 max-w-md mx-auto pb-24">
+                        <div className="space-y-2">
+                            <h3 className="text-sm font-bold text-blue-400 uppercase">1. General</h3>
+                            <div className="grid grid-cols-2 gap-3">
+                                <button onClick={() => dispatch({type: 'UPDATE_SURVEY', field: 'generalImpression', value: 'Stable'})} className={`p-4 rounded-xl border font-bold ${state.survey.generalImpression === 'Stable' ? 'bg-green-600 border-green-400' : 'bg-gray-800 border-gray-700'}`}>STABLE</button>
+                                <button onClick={() => dispatch({type: 'UPDATE_SURVEY', field: 'generalImpression', value: 'Critical'})} className={`p-4 rounded-xl border font-bold ${state.survey.generalImpression === 'Critical' ? 'bg-red-600 border-red-400 animate-pulse' : 'bg-gray-800 border-gray-700'}`}>CRITICAL</button>
+                            </div>
+                        </div>
+                        <div className="space-y-2">
+                            <h3 className="text-sm font-bold text-blue-400 uppercase">2. AVPU</h3>
+                            <div className="grid grid-cols-4 gap-2">
+                                {['A', 'V', 'P', 'U'].map(level => (
+                                    <button key={level} onClick={() => dispatch({type: 'UPDATE_SURVEY', field: 'avpu', value: level})} className={`p-3 rounded-lg border font-bold ${state.survey.avpu === level ? 'bg-blue-600 border-blue-400' : 'bg-gray-800 border-gray-700'}`}>{level}</button>
+                                ))}
+                            </div>
+                        </div>
+                        <div className="space-y-2"><h3 className="text-sm font-bold text-blue-400 uppercase">3. Airway</h3><div className="grid grid-cols-3 gap-2"><button onClick={() => dispatch({type: 'UPDATE_SURVEY', field: 'airway', value: 'Patent'})} className={`p-3 rounded-lg border text-sm font-bold ${state.survey.airway === 'Patent' ? 'bg-green-600 border-green-400' : 'bg-gray-800 border-gray-700'}`}>Patent</button><button onClick={() => dispatch({type: 'UPDATE_SURVEY', field: 'airway', value: 'Threatened'})} className={`p-3 rounded-lg border text-sm font-bold ${state.survey.airway === 'Threatened' ? 'bg-yellow-600 border-yellow-400' : 'bg-gray-800 border-gray-700'}`}>Threatened</button><button onClick={() => dispatch({type: 'UPDATE_SURVEY', field: 'airway', value: 'Obstructed'})} className={`p-3 rounded-lg border text-sm font-bold ${state.survey.airway === 'Obstructed' ? 'bg-red-600 border-red-400' : 'bg-gray-800 border-gray-700'}`}>Obstructed</button></div></div>
+                        <div className="space-y-2"><h3 className="text-sm font-bold text-blue-400 uppercase">4. Breathing</h3><div className="grid grid-cols-3 gap-2"><button onClick={() => dispatch({type: 'UPDATE_SURVEY', field: 'breathingStatus', value: 'Normal'})} className={`p-3 rounded-lg border text-sm font-bold ${state.survey.breathingStatus === 'Normal' ? 'bg-green-600 border-green-400' : 'bg-gray-800 border-gray-700'}`}>Normal</button><button onClick={() => dispatch({type: 'UPDATE_SURVEY', field: 'breathingStatus', value: 'Dyspnea'})} className={`p-3 rounded-lg border text-sm font-bold ${state.survey.breathingStatus === 'Dyspnea' ? 'bg-yellow-600 border-yellow-400' : 'bg-gray-800 border-gray-700'}`}>Dyspnea</button><button onClick={() => dispatch({type: 'UPDATE_SURVEY', field: 'breathingStatus', value: 'Apnea'})} className={`p-3 rounded-lg border text-sm font-bold ${state.survey.breathingStatus === 'Apnea' ? 'bg-red-600 border-red-400' : 'bg-gray-800 border-gray-700'}`}>Apnea</button></div></div>
+                        <div className="space-y-2"><h3 className="text-sm font-bold text-blue-400 uppercase">5. Circulation</h3><div className="grid grid-cols-2 gap-3"><button onClick={() => dispatch({type: 'UPDATE_SURVEY', field: 'pulse', value: 'Present'})} className={`p-4 rounded-xl border font-bold ${state.survey.pulse === 'Present' ? 'bg-green-600 border-green-400' : 'bg-gray-800 border-gray-700'}`}>Pulse Present</button><button onClick={() => dispatch({type: 'UPDATE_SURVEY', field: 'pulse', value: 'Absent'})} className={`p-4 rounded-xl border font-bold ${state.survey.pulse === 'Absent' ? 'bg-red-600 border-red-400' : 'bg-gray-800 border-gray-700'}`}>Pulseless</button></div></div>
+                        <div className="pt-4 pb-20"><button onClick={() => dispatch({type: 'GO_TO_WIZARD'})} className="w-full py-4 bg-blue-600 hover:bg-blue-500 rounded-xl font-bold text-lg shadow-lg flex items-center justify-center gap-2">Proceed <PlayCircle size={24}/></button></div>
+                    </div>
+                </div>
+            );
+
+            return (
+                <div className="min-h-screen bg-gray-950 text-white font-sans max-w-md mx-auto relative overflow-hidden flex flex-col shadow-2xl">
+                    {state.viewMode === 'SURVEY' && renderPrimarySurvey()}
+                    
+                    {activeModal !== 'NONE' && (
+                        <div className="absolute inset-0 z-50 bg-black/90 flex items-center justify-center p-4 backdrop-blur-md animate-in fade-in duration-200">
+                            <div className="bg-gray-800 rounded-2xl w-full max-w-sm p-5 shadow-2xl border border-gray-700 max-h-[90vh] overflow-y-auto">
+                                <div className="flex justify-between items-center mb-4 border-b border-gray-700 pb-2">
+                                    <h3 className="text-lg font-bold text-gray-100 flex items-center gap-2">
+                                        {activeModal}
+                                    </h3>
+                                    <button onClick={() => setActiveModal('NONE')} className="p-2 bg-gray-700 rounded-full"><X size={20}/></button>
+                                </div>
+                                
+                                {activeModal === 'SHOCK_ENERGY' && (
+                                    <div className="space-y-5">
+                                        <div className="text-center"><div className="inline-flex items-center justify-center p-3 bg-yellow-500 rounded-full mb-2"><Zap size={32} className="text-black" fill="black"/></div><h2 className="text-2xl font-black text-white">DEFIBRILLATION</h2></div>
+                                        <div className="grid grid-cols-3 gap-3">{['120', '150', '200', '270', '300', '360'].map(j => <button key={j} onClick={() => setEnergy(j)} className={`p-4 rounded-xl font-bold text-xl transition-all ${energy === j ? 'bg-yellow-500 text-black scale-105' : 'bg-gray-800 text-gray-400'}`}>{j}</button>)}</div>
+                                        <button onClick={() => { dispatch({type:'ADD_LOG', category:'PROCEDURE', action:'Defibrillation', detail:`${energy}J`}); setActiveModal('NONE'); }} className="w-full py-5 bg-red-600 hover:bg-red-500 rounded-2xl font-black text-2xl text-white shadow-2xl flex items-center justify-center gap-3 active:scale-95"><Zap fill="currentColor"/> SHOCK {energy}J</button>
+                                    </div>
+                                )}
+
+                                {activeModal === 'SUMMARY' && (
+                                    <div className="space-y-4">
+                                        <div className="bg-gray-900 p-4 rounded-xl space-y-2">
+                                            <div className="flex justify-between border-b border-gray-700 pb-2"><span className="text-gray-400">Duration</span><span className="font-mono font-bold text-xl">{formatTime(state.totalSeconds)}</span></div>
+                                            <div className="grid grid-cols-2 gap-4 pt-2">
+                                                <div className="text-center p-2 bg-gray-800 rounded-lg"><div className="text-xs text-gray-400">Shocks</div><div className="text-2xl font-bold text-yellow-400">{state.shockCount}</div></div>
+                                                <div className="text-center p-2 bg-gray-800 rounded-lg"><div className="text-xs text-gray-400">Epi</div><div className="text-2xl font-bold text-red-400">{state.epiDoseCount}</div></div>
+                                            </div>
+                                        </div>
+                                        <div className="max-h-60 overflow-y-auto bg-black/20 rounded-xl p-2 text-xs space-y-1">
+                                            {state.logs.length === 0 && <p className="text-center text-gray-500 py-4">No logs recorded.</p>}
+                                            {state.logs.map(log => (
+                                                <div key={log.id} onClick={() => setSelectedLogId(selectedLogId === log.id ? null : log.id)} className={`flex gap-2 border-b border-gray-800 pb-1 p-2 rounded cursor-pointer ${selectedLogId === log.id ? 'bg-red-900/30 border-red-800' : 'hover:bg-white/5'}`}>
+                                                    <span className="text-gray-500 font-mono">{log.offsetTime}</span><span className="flex-1 text-white">{log.action} {log.detail}</span>
+                                                    {selectedLogId === log.id && <button onClick={(e) => { e.stopPropagation(); if(confirm('Delete?')) { dispatch({type: 'REMOVE_LOG', logId: log.id}); setSelectedLogId(null); } }} className="px-2 py-0.5 bg-red-600 rounded text-white font-bold text-[10px] flex items-center gap-1"><Trash2 size={10}/> Undo</button>}
+                                                </div>
+                                            ))}
+                                        </div>
+                                        <button onClick={generatePDF} className="w-full py-4 bg-blue-600 hover:bg-blue-500 rounded-xl font-bold flex items-center justify-center gap-2 shadow-lg"><FileDown size={20}/> Export Full PDF</button>
+                                    </div>
+                                )}
+
+                                {activeModal === 'PROCEDURES' && (
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <button onClick={() => { dispatch({type:'ADD_LOG', category:'PROCEDURE', action:'FAST Scan'}); setActiveModal('NONE'); }} className="bg-gray-700 p-3 rounded-xl font-bold">FAST Scan</button>
+                                        <button onClick={() => { dispatch({type:'ADD_LOG', category:'PROCEDURE', action:'Needle Decompress'}); setActiveModal('NONE'); }} className="bg-gray-700 p-3 rounded-xl font-bold">Needle Decompress</button>
+                                        <button onClick={() => { dispatch({type:'ADD_LOG', category:'PROCEDURE', action:'ICD Placement'}); setActiveModal('NONE'); }} className="bg-gray-700 p-3 rounded-xl font-bold">ICD Placement</button>
+                                        <button onClick={() => { dispatch({type:'ADD_LOG', category:'PROCEDURE', action:'Pericardiocentesis'}); setActiveModal('NONE'); }} className="bg-gray-700 p-3 rounded-xl font-bold text-xs">Pericardiocentesis</button>
+                                        <button onClick={() => { dispatch({type:'ADD_LOG', category:'PROCEDURE', action:'Consult MED'}); setActiveModal('NONE'); }} className="bg-blue-800 p-3 rounded-xl font-bold">Consult MED</button>
+                                        <button onClick={() => { dispatch({type:'ADD_LOG', category:'PROCEDURE', action:'Consult Sx'}); setActiveModal('NONE'); }} className="bg-blue-800 p-3 rounded-xl font-bold">Consult Sx</button>
+                                    </div>
+                                )}
+                                
+                                {activeModal === 'VS_NOTE' && (
+                                    <div className="space-y-4">
+                                        <div><h4 className="text-xs font-bold text-gray-400 uppercase mb-2">Vital Signs</h4><div className="grid grid-cols-2 gap-3"><div className="flex items-center gap-1 bg-gray-700 p-2 rounded-xl border border-gray-600"><input type="number" placeholder="Sys" value={vsBpSys} onChange={(e)=>setVsBpSys(e.target.value)} className="bg-transparent w-full text-center outline-none text-white font-mono font-bold" /><span className="text-gray-400">/</span><input type="number" placeholder="Dia" value={vsBpDia} onChange={(e)=>setVsBpDia(e.target.value)} className="bg-transparent w-full text-center outline-none text-white font-mono font-bold" /></div><input type="number" placeholder="HR" value={vsHr} onChange={(e)=>setVsHr(e.target.value)} className="bg-gray-700 p-3 rounded-xl border border-gray-600 text-white font-mono font-bold text-center" /><input type="number" placeholder="RR" value={vsRr} onChange={(e)=>setVsRr(e.target.value)} className="bg-gray-700 p-3 rounded-xl border border-gray-600 text-white font-mono font-bold text-center" /><input type="number" placeholder="SpO2" value={vsSpo2} onChange={(e)=>setVsSpo2(e.target.value)} className="bg-gray-700 p-3 rounded-xl border border-gray-600 text-white font-mono font-bold text-center" /></div></div>
+                                        <div><h4 className="text-xs font-bold text-gray-400 uppercase mb-2">Note</h4><textarea rows={3} placeholder="Note..." value={vsNote} onChange={(e)=>setVsNote(e.target.value)} className="w-full bg-gray-700 p-3 rounded-xl border border-gray-600 text-white outline-none resize-none" /></div>
+                                        <button onClick={handleSaveVsNote} className="w-full py-3 bg-blue-600 hover:bg-blue-500 rounded-xl font-bold">Save Log</button>
+                                    </div>
+                                )}
+                                
+                                {activeModal === 'IV_ACCESS' && (<div className="space-y-4"><div className="grid grid-cols-2 gap-2"><button onClick={()=>setIvSite('IV')} className={`p-4 rounded-xl border font-bold ${ivSite==='IV'?'bg-blue-600 border-blue-400':'bg-gray-700 border-gray-600'}`}>IV</button><button onClick={()=>setIvSite('IO')} className={`p-4 rounded-xl border font-bold ${ivSite==='IO'?'bg-orange-600 border-orange-400':'bg-gray-700 border-gray-600'}`}>IO</button></div><button onClick={() => { dispatch({type:'ESTABLISH_IV', detail:`${ivSite} ${ivType} (${ivRate})`}); setActiveModal('NONE'); }} className="w-full py-3 bg-green-600 rounded-xl font-bold">Confirm</button></div>)}
+                                {activeModal === 'ETT' && (<div className="space-y-4"><div className="grid grid-cols-2 gap-2"><button onClick={() => setAirwayDevice('LMA')} className={`p-3 rounded-xl border font-bold ${airwayDevice === 'LMA' ? 'bg-indigo-600 border-indigo-400' : 'bg-gray-800'}`}>LMA</button><button onClick={() => setAirwayDevice('ETT')} className={`p-3 rounded-xl border font-bold ${airwayDevice === 'ETT' ? 'bg-blue-600 border-blue-400' : 'bg-gray-800'}`}>ETT</button></div><button onClick={() => { dispatch({type:'SECURE_AIRWAY', detail: airwayDevice}); setActiveModal('NONE'); }} className="w-full py-3 bg-green-600 rounded-xl font-bold mt-2">Confirm</button></div>)}
+                                {activeModal === 'RHYTHM_SELECT' && (<div className="space-y-4"><div className="grid grid-cols-2 gap-3"><button onClick={()=>{dispatch({type:'CHANGE_RHYTHM', rhythm:'VF'}); setActiveModal('NONE')}} className="p-4 bg-red-900/50 border border-red-600 hover:bg-red-800 rounded-xl font-bold flex flex-col items-center"><Zap size={24}/> VF</button><button onClick={()=>{dispatch({type:'CHANGE_RHYTHM', rhythm:'pVT'}); setActiveModal('NONE')}} className="p-4 bg-red-900/50 border border-red-600 hover:bg-red-800 rounded-xl font-bold flex flex-col items-center"><Activity size={24}/> pVT</button></div><div className="grid grid-cols-2 gap-3"><button onClick={()=>{dispatch({type:'CHANGE_RHYTHM', rhythm:'Asystole'}); setActiveModal('NONE')}} className="p-4 bg-slate-800 border border-slate-600 hover:bg-slate-700 rounded-xl font-bold text-gray-300">Asystole</button><button onClick={()=>{dispatch({type:'CHANGE_RHYTHM', rhythm:'PEA'}); setActiveModal('NONE')}} className="p-4 bg-slate-800 border border-slate-600 hover:bg-slate-700 rounded-xl font-bold text-gray-300">PEA</button></div></div>)}
+                            </div>
+                        </div>
+                    )}
+
+                    {state.viewMode === 'WIZARD' && (
+                        <div className="absolute inset-0 z-40 bg-gray-900 flex flex-col justify-center items-center p-6 space-y-6">
+                            <div className="text-center"><Activity className="w-20 h-20 text-red-500 mx-auto mb-4 animate-pulse" /><h1 className="text-4xl font-bold text-white">Digital ACLS 2025</h1></div>
+                            <div className="w-full bg-gray-800 p-6 rounded-3xl border border-gray-700 space-y-4"><input type="text" className="w-full bg-gray-900 p-3 rounded-xl border border-gray-600 text-white" value={patient.hn} onChange={e=>setPatient({...patient, hn:e.target.value})} placeholder="HN / ID" /></div>
+                            <div className="w-full grid grid-cols-2 gap-4"><button onClick={()=>handleStart('VF')} className="p-6 bg-red-700 hover:bg-red-600 rounded-3xl font-bold text-lg flex flex-col items-center gap-2"><Zap size={36}/> VF / pVT</button><button onClick={()=>handleStart('Asystole')} className="p-6 bg-slate-800 hover:bg-slate-700 rounded-3xl font-bold text-lg flex flex-col items-center gap-2 text-gray-300"><Activity size={36}/> Asystole</button></div>
+                        </div>
+                    )}
+
+                    {state.viewMode === 'RECORDER' && (
+                        <>
+                            <div className="bg-gray-800 p-4 border-b border-gray-700 shadow-lg z-10 grid grid-cols-3 gap-2 sticky top-0 items-center">
+                                <div className="text-center border-r border-gray-600 pr-2"><span className="text-[10px] text-gray-400 uppercase tracking-widest font-bold">Total Time</span><div className="text-2xl font-mono font-bold text-white mt-1">{formatTime(state.totalSeconds)}</div></div>
+                                <div className="text-center border-r border-gray-600 pr-2 flex flex-col items-center"><span className="text-[10px] text-gray-400 uppercase tracking-widest font-bold flex items-center gap-1"><Gauge size={10}/> CCF</span><div className={`text-2xl font-mono font-bold mt-1 ${state.ccfPercentage >= 80 ? 'text-green-400' : 'text-yellow-400'}`}>{state.ccfPercentage}%</div></div>
+                                <div className={`text-center rounded-xl flex flex-col items-center justify-center ${state.cycleSeconds > 110 ? 'bg-red-900/90 animate-pulse' : ''}`}><span className="text-[10px] text-gray-400 uppercase tracking-widest font-bold flex items-center gap-1"><Clock size={10}/> CPR</span><div className={`text-2xl font-mono font-bold mt-1 ${state.cycleSeconds > 110 ? 'text-red-100':'text-green-400'}`}>{formatTime(state.cycleSeconds)}</div></div>
+                            </div>
+                            
+                            <div className="flex-1 overflow-y-auto p-4 pb-32">
+                                <div className="grid grid-cols-2 gap-3 mb-4">
+                                    <button className="bg-gray-800 p-3 rounded-2xl border border-gray-700 relative active:scale-95" onClick={() => setActiveModal('RHYTHM_SELECT')}><span className="text-[10px] text-gray-400 uppercase font-bold">Rhythm</span><div className={`text-xl font-bold truncate ${isShockable ? 'text-red-400' : 'text-white'}`}>{state.currentRhythm}</div><Activity className="absolute right-2 bottom-2 text-gray-600 opacity-20" size={32}/></button>
+                                    <button onClick={() => dispatch({type:'TOGGLE_AUTO_CPR'})} className={`p-2 rounded-2xl border flex items-center justify-between px-4 relative ${state.isAutoCPR ? 'bg-blue-900/50 border-blue-400':'bg-gray-800 border-gray-700'}`}><div className="text-left"><span className="block text-[10px] font-bold uppercase text-gray-400">Mechanical</span><span className={`block text-xl font-bold ${state.isAutoCPR?'text-blue-100':'text-gray-500'}`}>{state.isAutoCPR ? 'ON' : 'OFF'}</span></div><HeartPulse size={24} className={state.isAutoCPR ? 'text-blue-400 animate-pulse':'text-gray-600'}/></button>
+                                </div>
+                                
+                                <div className="grid grid-cols-2 gap-3">
+                                    <button onClick={() => { if(isShockable){ setEnergy('200'); setActiveModal('SHOCK_ENERGY'); } }} disabled={!isShockable} className={`relative p-4 rounded-2xl font-black text-xl flex flex-col items-center justify-center gap-1 shadow-lg transition-all ${isShockable ? 'bg-yellow-500 hover:bg-yellow-400 text-black active:scale-95' : 'bg-gray-800 text-gray-600 border border-gray-700 cursor-not-allowed grayscale opacity-50'}`}>{isShockable && <Badge count={state.shockCount} color="bg-black text-yellow-500" />}<Zap size={28} fill={isShockable ? "black" : "none"}/> <span>SHOCK</span></button>
+                                    <button onClick={()=>dispatch({type:'RESET_CYCLE'})} className="bg-blue-600 hover:bg-blue-500 text-white p-4 rounded-2xl font-bold text-xl flex flex-col items-center justify-center gap-1 shadow-lg active:scale-95"><RotateCcw size={28}/> <span>RESET</span></button>
+                                    
+                                    <button onClick={() => dispatch({type:'ADMINISTER_MED', medName:'Adrenaline'})} className={`col-span-2 relative p-5 rounded-2xl font-bold flex flex-col items-center justify-center border-2 transition-all active:scale-95 ${isEpiReady() ? 'bg-red-900/40 border-red-600 hover:bg-red-900/60' : 'bg-gray-800 border-gray-700 opacity-60 cursor-not-allowed'}`}><Badge count={state.epiDoseCount} /><div className="flex items-center gap-3"><Syringe size={32} className={isEpiReady()?'text-red-400':'text-gray-500'}/><div className="text-center"><span className="text-2xl text-white block">ADRENALINE</span><span className={`text-sm font-normal ${isEpiReady() ? 'text-green-400':'text-red-400'}`}>{isEpiReady() ? '1mg IV/IO Ready' : 'Wait (Cooldown)'}</span></div></div></button>
+                                    
+                                    <button onClick={() => dispatch({type:'ADMINISTER_MED', medName:'Amiodarone'})} disabled={state.amioDoseCount >= 2 || !isShockable} className={`relative p-4 rounded-2xl font-bold flex flex-col items-center bg-purple-900/30 border border-purple-700 active:scale-95 ${(state.amioDoseCount >= 2 || !isShockable) && 'opacity-30 grayscale cursor-not-allowed'}`}><Badge count={state.amioDoseCount} color="bg-purple-500" /><Syringe size={24} className="text-purple-300"/><span className="mt-1 text-lg">AMIODARONE</span></button>
+                                    <button onClick={() => setActiveModal('ETT')} className={`p-4 rounded-2xl font-bold flex flex-col items-center border active:scale-95 ${state.airwaySecure ? 'bg-teal-900/40 border-teal-500 text-teal-100' : 'bg-gray-800 border-gray-700 text-gray-300'}`}><Stethoscope size={24} className={state.airwaySecure ? "text-teal-400" : "text-gray-500"}/><span className="mt-1 text-lg">AIRWAY</span></button>
+                                    
+                                    <div className="col-span-2 grid grid-cols-4 gap-2 mt-2">
+                                        <button onClick={() => setActiveModal('SUMMARY')} onDoubleClick={() => dispatch({type: 'UNDO'})} className="bg-gray-800 border border-gray-700 p-2 rounded-xl flex flex-col items-center justify-center gap-1 active:bg-gray-700"><Undo2 size={18} className="text-gray-300"/><span className="text-[9px] text-gray-300">SUMMARY</span></button>
+                                        <button onClick={()=>setActiveModal('IV_ACCESS')} className={`${state.ivAccessEstablished ? 'bg-cyan-900/40 border-cyan-500' : 'bg-gray-800 border-gray-700'} border p-2 rounded-xl flex flex-col items-center justify-center gap-1 active:bg-gray-700`}><Droplet size={18} className={state.ivAccessEstablished ? "text-cyan-200" : "text-cyan-400"}/><span className={`text-[9px] ${state.ivAccessEstablished ? "text-cyan-100" : "text-gray-400"}`}>IV/IO</span></button>
+                                        <button onClick={()=>setActiveModal('VS_NOTE')} className="bg-gray-800 border border-gray-700 p-2 rounded-xl flex flex-col items-center justify-center gap-1 active:bg-gray-700"><MessageSquare size={18} className="text-yellow-400"/><span className="text-[9px] text-gray-400">VS / NOTE</span></button>
+                                        <button onClick={()=>setActiveModal('LABS')} className={`${state.labsSent ? 'bg-indigo-900/40 border-indigo-500' : 'bg-gray-800 border-gray-700'} border p-2 rounded-xl flex flex-col items-center justify-center gap-1 active:bg-gray-700`}><TestTube size={18} className={state.labsSent ? "text-indigo-200" : "text-purple-400"}/><span className={`text-[9px] ${state.labsSent ? "text-indigo-100" : "text-gray-400"}`}>LABS</span></button>
+                                    </div>
+                                    <div className="col-span-2 grid grid-cols-4 gap-2">
+                                        <button onClick={()=>setActiveModal('PROCEDURES')} className="bg-gray-800 border border-gray-700 p-3 rounded-xl flex flex-col items-center justify-center gap-1 active:bg-gray-700 font-bold text-sm text-gray-300"><ClipboardList size={16}/> <span className="text-[10px]">PROCS</span></button>
+                                        <button onClick={()=>setActiveModal('DIAGNOSIS')} className="bg-gray-800 border border-gray-700 p-3 rounded-xl flex flex-col items-center justify-center gap-1 active:bg-gray-700 font-bold text-sm text-yellow-500"><HelpCircle size={16}/> <span className="text-[10px]">6H 6T</span></button>
+                                        <button onClick={()=>setActiveModal('ROSC_CHECKLIST')} className="bg-gray-800 border border-gray-700 p-3 rounded-xl flex flex-col items-center justify-center gap-1 active:bg-gray-700 font-bold text-sm text-green-400"><CheckCircle size={16}/> <span className="text-[10px]">ROSC</span></button>
+                                        <button onClick={()=>setActiveModal('TOR')} className="bg-gray-800 border border-gray-700 p-3 rounded-xl flex flex-col items-center justify-center gap-1 active:bg-gray-700 font-bold text-sm text-red-400"><Skull size={16}/> <span className="text-[10px]">TOR</span></button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="bg-gray-900 border-t border-gray-800 p-4 sticky bottom-0 safe-area-bottom z-20 shadow-[0_-5px_15px_rgba(0,0,0,0.5)] flex gap-3">
+                                <button onClick={() => setActiveModal('SUMMARY')} className="flex-1 flex items-center justify-center gap-2 px-2 py-4 bg-gray-800 text-white rounded-2xl hover:bg-gray-700 transition-colors font-bold text-sm active:scale-95 border border-gray-700"><FileText size={16} className="text-gray-400"/> SUMMARY</button>
+                                <button onClick={() => alert('Navigating to CPR Flow')} className="flex-[3] flex items-center justify-center gap-2 px-4 py-4 bg-gray-800 text-white rounded-2xl hover:bg-gray-700 transition-colors font-bold text-lg active:scale-95 border border-gray-700">CPR FLOW VIEW</button>
+                            </div>
+                        </>
+                    )}
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<ACLSRecorder />);
+    </script>
+</body>
+</html>

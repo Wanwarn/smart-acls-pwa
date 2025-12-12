@@ -1,0 +1,5 @@
+{
+  "name": "Smart ACLS Recorder 2025",
+  "description": "A mobile-first, high-contrast ACLS recorder for ER/ICU professionals. Features strictly typed logic based on 2025 algorithms, smart timers, and zero-typing interface.",
+  "requestFramePermissions": []
+}
