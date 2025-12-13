@@ -4,7 +4,7 @@ import { getFirestore, doc, onSnapshot, setDoc } from "firebase/firestore";
 
 // Your web app's Firebase configuration
 const firebaseConfig = {
-  apiKey: "AIzaSyA0vpgl2A2hhH0i-RYtD0SWFVE25mZbwjM",
+  apiKey: "AIzaSyCx9nefPu0L6W9dEJONBAWfR9Mlj0PcAwI",
   authDomain: "studio-4387606549-15d0e.firebaseapp.com",
   projectId: "studio-4387606549-15d0e",
   storageBucket: "studio-4387606549-15d0e.firebasestorage.app",
